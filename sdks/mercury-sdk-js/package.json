@@ -1,0 +1,20 @@
+{
+  "name": "@mercury/sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "license": "AGPL-3.0",
+  "scripts": {
+    "build:wasm": "cd ../../crates/mercury-sdk-core && wasm-pack build --target web --release && cp pkg/mercury_sdk_core_bg.wasm ../../sdks/mercury-sdk-js/wasm/ && cp pkg/mercury_sdk_core.js ../../sdks/mercury-sdk-js/wasm/ && cp pkg/mercury_sdk_core.d.ts ../../sdks/mercury-sdk-js/wasm/",
+    "test": "bun test",
+    "typecheck": "bun x tsc --noEmit"
+  },
+  "devDependencies": {
+    "bun-types": "^1.3.9",
+    "typescript": "^5.7"
+  },
+  "dependencies": {
+    "capnp-es": "^0.0.14"
+  }
+}

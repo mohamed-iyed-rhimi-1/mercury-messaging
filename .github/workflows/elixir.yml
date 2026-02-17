@@ -1,0 +1,44 @@
+name: Elixir CI
+
+on:
+  push:
+    branches: [main]
+    paths: ["apps/**", "mix.exs", "mix.lock"]
+  pull_request:
+    paths: ["apps/**", "mix.exs", "mix.lock"]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      MIX_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27.0"
+          elixir-version: "1.17"
+
+      - name: Cache deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: mix-${{ hashFiles('mix.lock') }}
+
+      - run: mix deps.get
+      - run: mix compile --warnings-as-errors
+
+      - name: Format check
+        run: mix format --check-formatted
+
+      - name: Credo
+        run: mix credo --strict
+
+      - name: Dialyzer
+        run: mix dialyzer
+        continue-on-error: true
+
+      - name: Test
+        run: mix test --cover

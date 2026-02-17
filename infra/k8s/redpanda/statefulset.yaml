@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redpanda
+  namespace: mercury
+spec:
+  serviceName: redpanda
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redpanda
+  template:
+    metadata:
+      labels:
+        app: redpanda
+    spec:
+      containers:
+        - name: redpanda
+          image: redpandadata/redpanda:v24.1.1
+          args:
+            - redpanda
+            - start
+            - --smp
+            - "1"
+            - --memory
+            - 256M
+            - --overprovisioned
+            - --kafka-addr
+            - 0.0.0.0:9092
+            - --advertise-kafka-addr
+            - redpanda.mercury.svc:9092
+          ports:
+            - containerPort: 9092
+              name: kafka
+            - containerPort: 8081
+              name: schema
+            - containerPort: 8082
+              name: proxy
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/redpanda/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redpanda
+  namespace: mercury
+spec:
+  clusterIP: None
+  selector:
+    app: redpanda
+  ports:
+    - port: 9092
+      name: kafka
+    - port: 8081
+      name: schema

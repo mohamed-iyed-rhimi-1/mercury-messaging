@@ -1,0 +1,57 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [main]
+    paths: ["crates/**", "schema/**", "Cargo.toml", "Cargo.lock"]
+  pull_request:
+    paths: ["crates/**", "schema/**", "Cargo.toml", "Cargo.lock"]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Cap'n Proto
+        run: sudo apt-get install -y capnproto
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --all-features
+
+      - name: Audit
+        run: |
+          cargo install cargo-audit --locked || true
+          cargo audit
+        continue-on-error: true
+
+      - name: Schema check
+        run: capnp compile -o- schema/mercury/v1/*.capnp
+
+      - name: Coverage
+        run: |
+          cargo install cargo-llvm-cov --locked || true
+          cargo llvm-cov --all-features --lcov --output-path lcov.info
+        continue-on-error: true
+
+      - name: Upload coverage
+        if: hashFiles('lcov.info') != ''
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          flags: rust
+        continue-on-error: true

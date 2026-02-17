@@ -1,0 +1,70 @@
+services:
+  scylladb:
+    image: scylladb/scylla:6.0
+    ports:
+      - "9042:9042"
+    command: --smp 2 --memory 2G --overprovisioned 1
+    volumes:
+      - scylla_data:/var/lib/scylla
+      - ./infra/docker/scylla-init.cql:/scylla-init.cql
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "SELECT now() FROM system.local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  postgresql:
+    image: citusdata/citus:12.1
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: mercury
+      POSTGRES_PASSWORD: mercury_dev
+      POSTGRES_DB: mercury_dev
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./infra/docker/pg-init.sql:/docker-entrypoint-initdb.d/01-init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mercury -d mercury_dev"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  nats:
+    image: nats:2.10-alpine
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    command: ["--jetstream", "--store_dir", "/data", "-m", "8222"]
+    volumes:
+      - nats_data:/data
+
+  dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
+    ports:
+      - "6380:6379"
+    ulimits:
+      memlock: -1
+    command: ["--requirepass", "mercury"]
+
+  redpanda:
+    image: redpandadata/redpanda:v24.1.1
+    ports:
+      - "9092:9092"
+      - "8081:8081"
+      - "8082:8082"
+    command:
+      - redpanda start
+      - --smp 1
+      - --memory 1G
+      - --overprovisioned
+      - --kafka-addr 0.0.0.0:9092
+      - --advertise-kafka-addr localhost:9092
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+
+volumes:
+  scylla_data:
+  pg_data:
+  nats_data:
+  redpanda_data:

@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mercury-core",
+    "crates/mercury-crypto",
+    "crates/mercury-crdt",
+    "crates/mercury-db",
+    "crates/mercury-nif",
+    "crates/mercury-sdk-core",
+    "crates/mercury-transport",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0"
+rust-version = "1.93"
+
+[workspace.dependencies]
+anyhow = "1"
+bytes = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+serde = { version = "1", features = ["derive"] }
+ulid = { version = "1", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+capnp = "0.20"
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1"
+
+[workspace.lints.rust]
+warnings = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"

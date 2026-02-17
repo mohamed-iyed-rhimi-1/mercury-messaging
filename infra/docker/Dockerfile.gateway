@@ -1,0 +1,75 @@
+# Mercury Gateway — Multi-stage Docker build
+# Stage 1: Compile Rust NIF for Linux
+# Stage 2: Elixir release (uses precompiled NIF)
+# Stage 3: Minimal runtime
+
+# ── Stage 1: Rust NIF ──
+FROM rust:1.93-slim-bookworm AS rust-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential capnproto && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+COPY .cargo/ .cargo/
+COPY schema/ schema/
+
+RUN cargo build --release -p mercury-nif
+
+# ── Stage 2: Elixir release ──
+FROM elixir:1.18-otp-27-slim AS elixir-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential git curl ca-certificates cmake && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+ENV MIX_ENV=prod
+
+# Deps first (cache layer)
+COPY mix.exs mix.lock ./
+COPY apps/gateway/mix.exs apps/gateway/mix.exs
+COPY apps/persistence/mix.exs apps/persistence/mix.exs
+COPY apps/presence/mix.exs apps/presence/mix.exs
+COPY apps/fanout/mix.exs apps/fanout/mix.exs
+RUN mix local.hex --force && mix local.rebar --force && mix deps.get --only prod
+
+# App code + config
+COPY config/ config/
+COPY apps/ apps/
+COPY rel/ rel/
+
+# Copy the Linux NIF from rust-builder into the expected priv path
+COPY --from=rust-builder /build/target/release/libmercury_nif.so \
+     apps/gateway/priv/native/libmercury_nif.so
+
+# Rustler needs Cargo.toml to exist even with skip_compilation
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+COPY .cargo/ .cargo/
+
+RUN mix deps.compile && mix compile && mix release mercury
+
+# ── Stage 3: Runtime ──
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libstdc++6 openssl ca-certificates libncurses6 locales curl tini && \
+    rm -rf /var/lib/apt/lists/* && \
+    sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
+
+ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+
+RUN groupadd -g 1000 mercury && useradd -u 1000 -g mercury -d /app mercury
+WORKDIR /app
+
+COPY --from=elixir-builder --chown=mercury:mercury /build/_build/prod/rel/mercury ./
+
+USER mercury
+EXPOSE 4000
+
+HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
+  CMD curl -sf http://localhost:4000/health/live || exit 1
+
+ENTRYPOINT ["tini", "--"]
+CMD ["bin/mercury", "start"]

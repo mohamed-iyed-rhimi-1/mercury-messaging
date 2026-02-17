@@ -1,0 +1,169 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/gateway
+
+jobs:
+  test:
+    name: Pre-release tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: citusdata/citus:12.1
+        env:
+          POSTGRES_USER: mercury
+          POSTGRES_PASSWORD: mercury_dev
+          POSTGRES_DB: mercury_dev
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U mercury"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+      nats:
+        image: nats:2.10-alpine
+        ports: ["4222:4222"]
+      dragonfly:
+        image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
+        ports: ["6380:6379"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27"
+          elixir-version: "1.18"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # Rust
+      - run: cargo fmt --check
+      - run: cargo clippy --all-features -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo install cargo-audit --locked && cargo audit
+
+      # Elixir
+      - run: mix local.hex --force && mix local.rebar --force
+      - run: mix deps.get
+      - run: mix format --check-formatted
+      - run: mix credo --strict
+      - run: mix test --exclude integration
+        env:
+          MIX_ENV: test
+
+      # JS SDK
+      - working-directory: sdks/mercury-sdk-js
+        run: bun install
+      - working-directory: sdks/mercury-sdk-js
+        run: bun x tsc --noEmit
+      - working-directory: sdks/mercury-sdk-js
+        run: bun test
+
+  build-docker:
+    name: Build & push Docker image
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: infra/docker/Dockerfile.gateway
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+  build-wasm:
+    name: Build WASM SDK
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install wasm-pack
+      - run: cd crates/mercury-sdk-core && wasm-pack build --target web --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wasm-sdk
+          path: crates/mercury-sdk-core/pkg/
+
+  release:
+    name: Create GitHub Release
+    needs: [build-docker, build-wasm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: wasm-sdk
+          path: wasm-sdk/
+
+      - name: Package WASM SDK
+        run: tar czf mercury-sdk-wasm.tar.gz -C wasm-sdk .
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -z "$PREV_TAG" ]; then
+            CHANGES=$(git log --oneline --no-decorate)
+          else
+            CHANGES=$(git log --oneline --no-decorate "${PREV_TAG}..HEAD")
+          fi
+          {
+            echo "CHANGELOG<<EOF"
+            echo "$CHANGES"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          body: |
+            ## What's Changed
+
+            ${{ steps.changelog.outputs.CHANGELOG }}
+
+            ## Docker Image
+
+            ```bash
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+            ```
+
+            ## Installation
+
+            See [README](https://github.com/${{ github.repository }}#quick-start) for full setup instructions.
+          files: |
+            mercury-sdk-wasm.tar.gz
+          generate_release_notes: true

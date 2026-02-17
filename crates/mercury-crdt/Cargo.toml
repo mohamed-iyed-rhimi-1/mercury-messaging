@@ -1,0 +1,23 @@
+[package]
+name = "mercury-crdt"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+mercury-core = { path = "../mercury-core" }
+
+[dev-dependencies]
+proptest.workspace = true
+criterion.workspace = true
+serde_json = "1"
+
+[[bench]]
+name = "crdt_benchmarks"
+harness = false
+
+[lints]
+workspace = true

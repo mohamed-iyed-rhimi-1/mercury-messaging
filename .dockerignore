@@ -1,0 +1,14 @@
+_build
+deps
+node_modules
+.git
+.elixir_ls
+sdks
+tests
+docs
+infra
+.github
+target
+scripts
+*.md
+!mix.exs

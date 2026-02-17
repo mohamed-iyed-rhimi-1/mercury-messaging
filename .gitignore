@@ -1,0 +1,36 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Elixir
+/_build/
+/deps/
+*.ez
+*.beam
+/cover/
+erl_crash.dump
+.elixir_ls/
+
+# Node / Bun
+node_modules/
+sdks/mercury-sdk-js/wasm/*.wasm
+sdks/mercury-sdk-js/wasm/*.js
+sdks/mercury-sdk-js/wasm/*.d.ts
+
+# WASM build artifacts
+crates/mercury-sdk-core/pkg/
+
+# OS
+.DS_Store
+*.swp
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Environment
+.env
+.env.local
+.env.production

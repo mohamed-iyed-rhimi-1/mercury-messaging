@@ -1,0 +1,17 @@
+[package]
+name = "mercury-nif"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+bytes.workspace = true
+mercury-core = { path = "../mercury-core" }
+mercury-crdt = { path = "../mercury-crdt" }
+mercury-crypto = { path = "../mercury-crypto" }
+rustler = "0.37"
+
+[lints]
+workspace = true

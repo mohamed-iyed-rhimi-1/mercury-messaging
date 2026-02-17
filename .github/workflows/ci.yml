@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+env:
+  MIX_ENV: test
+  RUST_BACKTRACE: 1
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, test, audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-features -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo install cargo-audit && cargo audit
+
+  elixir:
+    name: Elixir (fmt, credo, dialyzer, test)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: citusdata/citus:12.1
+        env:
+          POSTGRES_USER: mercury
+          POSTGRES_PASSWORD: mercury_dev
+          POSTGRES_DB: mercury_dev
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U mercury"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+      scylladb:
+        image: scylladb/scylla:6.0
+        ports: ["9042:9042"]
+        options: >-
+          --health-cmd "cqlsh -e 'SELECT now() FROM system.local'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      nats:
+        image: nats:2.10-alpine
+        ports: ["4222:4222"]
+      dragonfly:
+        image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
+        ports: ["6380:6379"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27"
+          elixir-version: "1.18"
+      - run: mix local.hex --force && mix local.rebar --force
+      - run: mix deps.get
+      - run: mix format --check-formatted
+      - run: mix credo --strict
+      - run: mix dialyzer
+      - run: mix test --exclude integration
+      - run: mix test apps/persistence/test/persistence_integration_test.exs --include integration
+
+  sdk:
+    name: SDK (typecheck, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - working-directory: sdks/mercury-sdk-js
+        run: bun install
+      - working-directory: sdks/mercury-sdk-js
+        run: bun x tsc --noEmit
+      - working-directory: sdks/mercury-sdk-js
+        run: bun test
+
+  wasm:
+    name: WASM build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install wasm-pack
+      - run: cd crates/mercury-sdk-core && wasm-pack build --target web --release
+      - name: Check WASM size
+        run: |
+          SIZE=$(stat -c%s crates/mercury-sdk-core/pkg/mercury_sdk_core_bg.wasm)
+          echo "WASM size: $SIZE bytes ($(( SIZE / 1024 )) KB)"
+          if [ "$SIZE" -gt 716800 ]; then
+            echo "ERROR: WASM binary exceeds 700KB limit"
+            exit 1
+          fi
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    needs: [rust, elixir]
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f infra/docker/Dockerfile.gateway -t mercury/gateway:ci .
+      - name: Check image size
+        run: |
+          SIZE=$(docker image inspect mercury/gateway:ci --format='{{.Size}}')
+          echo "Image size: $(( SIZE / 1024 / 1024 )) MB"

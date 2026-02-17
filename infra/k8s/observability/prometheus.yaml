@@ -1,0 +1,196 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: mercury
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+
+    rule_files:
+      - /etc/prometheus/rules/*.yml
+
+    scrape_configs:
+      - job_name: gateway
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [mercury]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            regex: gateway
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_ip]
+            target_label: __address__
+            replacement: "$1:9568"
+
+      - job_name: scylladb
+        static_configs:
+          - targets: ["scylladb-0.scylladb.mercury.svc:9180"]
+
+      - job_name: nats
+        static_configs:
+          - targets: ["nats-0.nats.mercury.svc:8222"]
+
+      - job_name: dragonfly
+        static_configs:
+          - targets: ["dragonfly.mercury.svc:6379"]
+
+  alerts.yml: |
+    groups:
+      - name: mercury
+        rules:
+          - alert: GatewayHighLatency
+            expr: histogram_quantile(0.99, rate(phoenix_endpoint_duration_milliseconds_bucket[5m])) > 100
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Gateway P99 latency >100ms"
+
+          - alert: HighErrorRate
+            expr: rate(phoenix_endpoint_errors_total[5m]) / rate(phoenix_endpoint_requests_total[5m]) > 0.01
+            for: 5m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Error rate >1%"
+
+          - alert: ScyllaDBDown
+            expr: up{job="scylladb"} == 0
+            for: 1m
+            labels:
+              severity: critical
+            annotations:
+              summary: "ScyllaDB node down"
+
+          - alert: NATSConsumerLag
+            expr: nats_consumer_num_pending > 10000
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "NATS consumer lag >10K"
+
+          - alert: DragonflyHighMemory
+            expr: dragonfly_memory_used_bytes / dragonfly_memory_max_bytes > 0.8
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Dragonfly memory >80%"
+
+          - alert: PodCrashLooping
+            expr: increase(kube_pod_container_status_restarts_total{namespace="mercury"}[5m]) > 3
+            for: 1m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Pod restarting >3 times in 5min"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: mercury
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      serviceAccountName: prometheus
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.51.0
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time=15d
+            - --web.enable-lifecycle
+          ports:
+            - containerPort: 9090
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 512Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+            - name: rules
+              mountPath: /etc/prometheus/rules
+            - name: data
+              mountPath: /prometheus
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9090
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: 9090
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+        - name: rules
+          configMap:
+            name: prometheus-config
+            items:
+              - key: alerts.yml
+                path: alerts.yml
+        - name: data
+          emptyDir:
+            sizeLimit: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: mercury
+spec:
+  selector:
+    app: prometheus
+  ports:
+    - port: 9090
+      targetPort: 9090
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: mercury
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mercury-prometheus
+rules:
+  - apiGroups: [""]
+    resources: [pods, nodes, endpoints]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mercury-prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mercury-prometheus
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: mercury

@@ -1,0 +1,29 @@
+[package]
+name = "mercury-crypto"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+wasm = ["openmls/js"]
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+openmls = { version = "0.8", features = ["test-utils"] }
+openmls_rust_crypto = "0.5"
+openmls_basic_credential = { version = "0.5", features = ["clonable"] }
+openmls_memory_storage = "0.5"
+openmls_traits = "0.5"
+
+[dev-dependencies]
+proptest.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "mls_bench"
+harness = false
+
+[lints]
+workspace = true
