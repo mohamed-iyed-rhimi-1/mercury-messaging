@@ -1,5 +1,9 @@
 # Mercury Messaging
 
+---
+
+> **⚠️ This project is incomplete and under active development. Performance benchmarks have not been validated yet. Use at your own risk.**
+
 A production-grade, open-source messaging platform built with **Rust** and **Elixir** — designed for ultra-low latency, end-to-end encryption by default, and offline-first operation.
 
 Mercury is an SDK-first platform: iOS, Android, and Web SDKs share a single Rust core compiled to native (via UniFFI) and WASM (via wasm-bindgen). Third-party developers embed Mercury into their own apps.
