@@ -41,6 +41,9 @@ export const EV_SYNC_CURSOR = 0x0d;
 export const EV_CH_CREATE = 0x0e;
 export const EV_PRESENCE_JOIN = 0x0f;
 export const EV_STATUS_UPDATE = 0x11;
+export const EV_MLS_MEMBERS = 0x12;
+export const EV_MLS_GROUP_INFO = 0x13;
+export const EV_MLS_CEK = 0x14;
 
 const HEADER_SIZE = 7; // 1 + 4 + 2
 

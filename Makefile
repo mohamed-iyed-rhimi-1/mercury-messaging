@@ -23,8 +23,8 @@ db-reset:
 # Build Rust NIF and copy to Elixir priv
 nif:
 	cargo build --release -p mercury-nif
-	mkdir -p apps/gateway/priv/native
-	cp target/release/libmercury_nif.dylib apps/gateway/priv/native/libmercury_nif.so
+	mkdir -p apps/mercury_core/priv/native
+	cp target/release/libmercury_nif.dylib apps/mercury_core/priv/native/libmercury_nif.so
 
 # Run all tests (Rust + Elixir)
 test: test-rust nif test-elixir

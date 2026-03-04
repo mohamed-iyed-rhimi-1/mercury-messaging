@@ -61,8 +61,8 @@ defmodule Persistence.IntegrationTest do
 
   describe "ScyllaDB messages" do
     test "write and read message" do
-      bucket = Gateway.Native.compute_time_bucket(System.os_time(:millisecond))
-      msg_id = Gateway.Native.generate_message_id()
+      bucket = MercuryCore.Native.compute_time_bucket(System.os_time(:millisecond))
+      msg_id = MercuryCore.Native.generate_message_id()
 
       msg = %{
         message_id: msg_id,
@@ -83,11 +83,11 @@ defmodule Persistence.IntegrationTest do
     end
 
     test "tenant isolation" do
-      bucket = Gateway.Native.compute_time_bucket(System.os_time(:millisecond))
+      bucket = MercuryCore.Native.compute_time_bucket(System.os_time(:millisecond))
       other_tenant = :crypto.strong_rand_bytes(16)
 
       msg = %{
-        message_id: Gateway.Native.generate_message_id(),
+        message_id: MercuryCore.Native.generate_message_id(),
         sender_id: @sender_id,
         encrypted_content: "secret",
         content_type: 0,
@@ -100,13 +100,13 @@ defmodule Persistence.IntegrationTest do
     end
 
     test "messages ordered by message_id DESC" do
-      bucket = Gateway.Native.compute_time_bucket(System.os_time(:millisecond))
+      bucket = MercuryCore.Native.compute_time_bucket(System.os_time(:millisecond))
       channel = :crypto.strong_rand_bytes(16)
 
       ids =
         for i <- 1..5 do
           Process.sleep(1)
-          id = Gateway.Native.generate_message_id()
+          id = MercuryCore.Native.generate_message_id()
 
           msg = %{
             message_id: id,
@@ -210,55 +210,55 @@ defmodule Persistence.IntegrationTest do
   describe "MLS NIF roundtrip" do
     test "full lifecycle: identity → group → add member → encrypt → decrypt" do
       # Alice creates identity and group
-      {:ok, alice_ref} = Gateway.Native.mls_create_identity("alice-device-1")
-      {:ok, alice_kp} = Gateway.Native.mls_generate_key_package(alice_ref)
+      {:ok, alice_ref} = MercuryCore.Native.mls_create_identity("alice-device-1")
+      {:ok, alice_kp} = MercuryCore.Native.mls_generate_key_package(alice_ref)
       assert is_binary(alice_kp) and byte_size(alice_kp) > 0
 
       group_id = "test-group-#{System.unique_integer([:positive])}"
-      :ok = Gateway.Native.mls_create_group(alice_ref, group_id)
+      :ok = MercuryCore.Native.mls_create_group(alice_ref, group_id)
 
       # Bob creates identity and key package
-      {:ok, bob_ref} = Gateway.Native.mls_create_identity("bob-device-1")
-      {:ok, bob_kp} = Gateway.Native.mls_generate_key_package(bob_ref)
+      {:ok, bob_ref} = MercuryCore.Native.mls_create_identity("bob-device-1")
+      {:ok, bob_kp} = MercuryCore.Native.mls_generate_key_package(bob_ref)
 
       # Alice adds Bob using his key package
-      {:ok, commit, welcome} = Gateway.Native.mls_add_member(alice_ref, group_id, bob_kp)
+      {:ok, commit, welcome} = MercuryCore.Native.mls_add_member(alice_ref, group_id, bob_kp)
       assert byte_size(commit) > 0
       assert byte_size(welcome) > 0
 
       # Bob processes welcome to join the group
-      {:ok, joined_group_id} = Gateway.Native.mls_process_welcome(bob_ref, welcome)
+      {:ok, joined_group_id} = MercuryCore.Native.mls_process_welcome(bob_ref, welcome)
       assert is_binary(joined_group_id)
 
       # Alice encrypts a message
       plaintext = "hello from alice"
-      {:ok, ciphertext} = Gateway.Native.mls_encrypt(alice_ref, group_id, plaintext)
+      {:ok, ciphertext} = MercuryCore.Native.mls_encrypt(alice_ref, group_id, plaintext)
       assert ciphertext != plaintext
 
       # Bob decrypts the message
-      {:ok, decrypted} = Gateway.Native.mls_decrypt(bob_ref, joined_group_id, ciphertext)
+      {:ok, decrypted} = MercuryCore.Native.mls_decrypt(bob_ref, joined_group_id, ciphertext)
       assert decrypted == plaintext
     end
 
     test "process_commit syncs group state" do
-      {:ok, alice_ref} = Gateway.Native.mls_create_identity("alice-commit-test")
+      {:ok, alice_ref} = MercuryCore.Native.mls_create_identity("alice-commit-test")
       group_id = "commit-group-#{System.unique_integer([:positive])}"
-      :ok = Gateway.Native.mls_create_group(alice_ref, group_id)
+      :ok = MercuryCore.Native.mls_create_group(alice_ref, group_id)
 
-      {:ok, bob_ref} = Gateway.Native.mls_create_identity("bob-commit-test")
-      {:ok, bob_kp} = Gateway.Native.mls_generate_key_package(bob_ref)
+      {:ok, bob_ref} = MercuryCore.Native.mls_create_identity("bob-commit-test")
+      {:ok, bob_kp} = MercuryCore.Native.mls_generate_key_package(bob_ref)
 
       # Charlie will process the commit as an existing member
-      {:ok, charlie_ref} = Gateway.Native.mls_create_identity("charlie-commit-test")
-      {:ok, charlie_kp} = Gateway.Native.mls_generate_key_package(charlie_ref)
+      {:ok, charlie_ref} = MercuryCore.Native.mls_create_identity("charlie-commit-test")
+      {:ok, charlie_kp} = MercuryCore.Native.mls_generate_key_package(charlie_ref)
 
       # Add Charlie first
-      {:ok, _commit1, welcome1} = Gateway.Native.mls_add_member(alice_ref, group_id, charlie_kp)
-      {:ok, charlie_gid} = Gateway.Native.mls_process_welcome(charlie_ref, welcome1)
+      {:ok, _commit1, welcome1} = MercuryCore.Native.mls_add_member(alice_ref, group_id, charlie_kp)
+      {:ok, charlie_gid} = MercuryCore.Native.mls_process_welcome(charlie_ref, welcome1)
 
       # Alice adds Bob — Charlie must process the commit
-      {:ok, commit2, _welcome2} = Gateway.Native.mls_add_member(alice_ref, group_id, bob_kp)
-      :ok = Gateway.Native.mls_process_commit(charlie_ref, charlie_gid, commit2)
+      {:ok, commit2, _welcome2} = MercuryCore.Native.mls_add_member(alice_ref, group_id, bob_kp)
+      :ok = MercuryCore.Native.mls_process_commit(charlie_ref, charlie_gid, commit2)
     end
   end
 
@@ -340,11 +340,11 @@ defmodule Persistence.IntegrationTest do
       # Write 3 messages
       for i <- 1..3 do
         ts = System.system_time(:millisecond)
-        bucket = Gateway.Native.compute_time_bucket(ts)
+        bucket = MercuryCore.Native.compute_time_bucket(ts)
 
         :ok =
           Persistence.Messages.write(@tenant_id, channel, bucket, %{
-            message_id: Gateway.Native.generate_message_id(),
+            message_id: MercuryCore.Native.generate_message_id(),
             sender_id: @sender_id,
             encrypted_content: "sync msg #{i}",
             content_type: 0,
@@ -368,11 +368,11 @@ defmodule Persistence.IntegrationTest do
       # Write first batch
       for _ <- 1..3 do
         ts = System.system_time(:millisecond)
-        bucket = Gateway.Native.compute_time_bucket(ts)
+        bucket = MercuryCore.Native.compute_time_bucket(ts)
 
         :ok =
           Persistence.Messages.write(@tenant_id, channel, bucket, %{
-            message_id: Gateway.Native.generate_message_id(),
+            message_id: MercuryCore.Native.generate_message_id(),
             sender_id: @sender_id,
             encrypted_content: "batch1",
             content_type: 0,
@@ -391,11 +391,11 @@ defmodule Persistence.IntegrationTest do
       # Write second batch
       for _ <- 1..2 do
         ts = System.system_time(:millisecond)
-        bucket = Gateway.Native.compute_time_bucket(ts)
+        bucket = MercuryCore.Native.compute_time_bucket(ts)
 
         :ok =
           Persistence.Messages.write(@tenant_id, channel, bucket, %{
-            message_id: Gateway.Native.generate_message_id(),
+            message_id: MercuryCore.Native.generate_message_id(),
             sender_id: @sender_id,
             encrypted_content: "batch2",
             content_type: 0,
@@ -420,7 +420,7 @@ defmodule Persistence.IntegrationTest do
 
     test "apply_deltas persists MessageAppend to ScyllaDB" do
       channel = :crypto.strong_rand_bytes(16)
-      msg_id = Gateway.Native.generate_message_id()
+      msg_id = MercuryCore.Native.generate_message_id()
       ts = System.system_time(:millisecond)
 
       deltas = [
@@ -436,7 +436,7 @@ defmodule Persistence.IntegrationTest do
 
       {:ok, 1} = Persistence.Sync.apply_deltas(@tenant_id, channel, deltas)
 
-      bucket = Gateway.Native.compute_time_bucket(ts)
+      bucket = MercuryCore.Native.compute_time_bucket(ts)
       {:ok, msgs} = Persistence.Messages.read(@tenant_id, channel, bucket, 10)
       assert Enum.any?(msgs, &(&1.encrypted_content == "offline msg"))
     end
@@ -475,13 +475,13 @@ defmodule Persistence.IntegrationTest do
 
       assert {:error, :not_found} = Persistence.ReadPositions.get(tid, uid, cid)
 
-      mid1 = Gateway.Native.generate_message_id()
+      mid1 = MercuryCore.Native.generate_message_id()
       :ok = Persistence.ReadPositions.update(tid, uid, cid, mid1)
       assert {:ok, ^mid1} = Persistence.ReadPositions.get(tid, uid, cid)
 
       # Advance forward
       Process.sleep(2)
-      mid2 = Gateway.Native.generate_message_id()
+      mid2 = MercuryCore.Native.generate_message_id()
       :ok = Persistence.ReadPositions.update(tid, uid, cid, mid2)
       assert {:ok, ^mid2} = Persistence.ReadPositions.get(tid, uid, cid)
 
@@ -497,8 +497,8 @@ defmodule Persistence.IntegrationTest do
       cid2 = :crypto.strong_rand_bytes(16)
       cid3 = :crypto.strong_rand_bytes(16)
 
-      mid1 = Gateway.Native.generate_message_id()
-      mid2 = Gateway.Native.generate_message_id()
+      mid1 = MercuryCore.Native.generate_message_id()
+      mid2 = MercuryCore.Native.generate_message_id()
       :ok = Persistence.ReadPositions.update(tid, uid, cid1, mid1)
       :ok = Persistence.ReadPositions.update(tid, uid, cid2, mid2)
 

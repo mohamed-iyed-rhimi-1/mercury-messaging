@@ -40,6 +40,7 @@ defmodule Gateway.MixProject do
       {:opentelemetry_ecto, "~> 1.2"},
       {:prom_ex, "~> 1.9"},
       {:libcluster, "~> 3.4"},
+      {:mercury_core, in_umbrella: true},
       {:presence, in_umbrella: true},
       {:persistence, in_umbrella: true},
       {:mint_web_socket, "~> 1.0", only: :test}

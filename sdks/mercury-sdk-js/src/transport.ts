@@ -27,13 +27,15 @@ export class BinaryTransport {
   private ref = 0;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private pendingReplies = new Map<number, ReplyCallback>();
-  private topicBindings = new Map<number, Map<number, EventCallback>>();
+  private topicBindings = new Map<number, Map<number, EventCallback[]>>();
   private topicNameToId = new Map<string, number>();
   private topicIdToName = new Map<number, string>();
   private joinedTopics = new Set<string>();
   private reconnectAttempt = 0;
   private closed = false;
   private reconnectCallbacks: ReconnectCallback[] = [];
+
+  private deferredBindings = new Map<string, EventCallback[]>();
 
   constructor(
     private url: string,
@@ -83,13 +85,13 @@ export class BinaryTransport {
     return new Promise((resolve, reject) => {
       const ref = this.nextRef();
       const topicBytes = new TextEncoder().encode(topic);
+      // Add to joinedTopics BEFORE sending so handleMessage can map the topic ID
+      this.joinedTopics.add(topic);
       this.pendingReplies.set(ref, (status, data) => {
         if (status === STATUS_OK) {
-          // Server assigned topic ID is in the frame header
-          // We extract it from the reply frame's topicId field
-          this.joinedTopics.add(topic);
           resolve();
         } else {
+          this.joinedTopics.delete(topic);
           reject(new Error(`Join failed: ${new TextDecoder().decode(data)}`));
         }
       });
@@ -119,19 +121,19 @@ export class BinaryTransport {
     if (!this.topicBindings.has(topicId)) {
       this.topicBindings.set(topicId, new Map());
     }
-    this.topicBindings.get(topicId)!.set(event, callback);
+    const eventMap = this.topicBindings.get(topicId)!;
+    if (!eventMap.has(event)) eventMap.set(event, []);
+    eventMap.get(event)!.push(callback);
   }
 
   onByName(topic: string, event: number, callback: EventCallback): void {
-    // Deferred binding — will be resolved when topic ID is known
     const existing = this.topicNameToId.get(topic);
     if (existing !== undefined) {
       this.on(existing, event, callback);
     }
-    // Store for later resolution
     const key = `${topic}:${event}`;
-    (this as unknown as Record<string, EventCallback[]>)[`_deferred_${key}`] ??= [];
-    (this as unknown as Record<string, EventCallback[]>)[`_deferred_${key}`].push(callback);
+    if (!this.deferredBindings.has(key)) this.deferredBindings.set(key, []);
+    this.deferredBindings.get(key)!.push(callback);
   }
 
   off(topicId: number, event: number): void {
@@ -182,21 +184,16 @@ export class BinaryTransport {
       const event = frame.payload[0];
       const eventData = frame.payload.subarray(1);
       const bindings = this.topicBindings.get(frame.topicId);
-      bindings?.get(event)?.(eventData);
+      const callbacks = bindings?.get(event);
+      if (callbacks) for (const cb of callbacks) cb(eventData);
     }
   }
 
   private resolveDeferredBindings(topic: string, topicId: number): void {
-    // Move any deferred bindings to the real topic ID
-    const self = this as unknown as Record<string, EventCallback[]>;
-    for (const key of Object.keys(self)) {
-      if (key.startsWith(`_deferred_${topic}:`)) {
+    for (const [key, callbacks] of this.deferredBindings) {
+      if (key.startsWith(`${topic}:`)) {
         const event = parseInt(key.split(":").pop()!, 10);
-        const callbacks = self[key];
-        for (const cb of callbacks) {
-          this.on(topicId, event, cb);
-        }
-        delete self[key];
+        for (const cb of callbacks) this.on(topicId, event, cb);
       }
     }
   }
@@ -233,12 +230,14 @@ export class BinaryTransport {
         this.connect()
           .then(() => {
             const rejoinPromises = [...this.joinedTopics].map((topic) => {
-              // Clear old mapping so join assigns new ID
+              // Clear old mapping — deferred bindings will be re-resolved on join
               const oldId = this.topicNameToId.get(topic);
               if (oldId !== undefined) {
                 this.topicNameToId.delete(topic);
                 this.topicIdToName.delete(oldId);
+                this.topicBindings.delete(oldId);
               }
+              this.joinedTopics.delete(topic);
               return this.join(topic).catch(() => {});
             });
             Promise.all(rejoinPromises).then(() => {

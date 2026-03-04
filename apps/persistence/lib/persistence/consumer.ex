@@ -61,7 +61,8 @@ defmodule Persistence.Consumer do
         Logger.warning("Unknown cache invalidation event: #{body}")
     end
   rescue
-    e -> Logger.warning("Cache invalidation failed: #{inspect(e)}")
+    e ->
+      Logger.warning("Cache invalidation failed: #{Exception.format(:error, e, __STACKTRACE__)}")
   end
 
   defp nats_enabled?,

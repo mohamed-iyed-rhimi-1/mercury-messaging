@@ -44,6 +44,16 @@ pub enum Delta {
         emoji: String,
         hlc: Hlc,
     },
+    MemberAdd {
+        channel_id: [u8; 16],
+        user_id: [u8; 16],
+        hlc: Hlc,
+    },
+    MemberRemove {
+        channel_id: [u8; 16],
+        user_id: [u8; 16],
+        hlc: Hlc,
+    },
     ReadPositionUpdate {
         channel_id: [u8; 16],
         user_id: [u8; 16],
@@ -60,7 +70,9 @@ impl Delta {
             | Self::MessageEdit { hlc, .. }
             | Self::MessageDelete { hlc, .. }
             | Self::ReactionAdd { hlc, .. }
-            | Self::ReactionRemove { hlc, .. } => Some(hlc),
+            | Self::ReactionRemove { hlc, .. }
+            | Self::MemberAdd { hlc, .. }
+            | Self::MemberRemove { hlc, .. } => Some(hlc),
             Self::ReadPositionUpdate { .. } => None,
         }
     }
@@ -223,6 +235,16 @@ mod tests {
                 emoji: "👍".into(),
                 hlc,
             },
+            Delta::MemberAdd {
+                channel_id: [1; 16],
+                user_id: [2; 16],
+                hlc,
+            },
+            Delta::MemberRemove {
+                channel_id: [1; 16],
+                user_id: [2; 16],
+                hlc,
+            },
             Delta::ReadPositionUpdate {
                 channel_id: [1; 16],
                 user_id: [2; 16],
@@ -234,6 +256,43 @@ mod tests {
             let back: Delta = serde_json::from_str(&json).unwrap();
             assert_eq!(*d, back);
         }
+    }
+
+    #[test]
+    fn member_add_serde_roundtrip() {
+        let delta = Delta::MemberAdd {
+            channel_id: [5; 16],
+            user_id: [6; 16],
+            hlc: test_hlc(2000),
+        };
+        let json = serde_json::to_string(&delta).unwrap();
+        let back: Delta = serde_json::from_str(&json).unwrap();
+        assert_eq!(delta, back);
+        assert!(json.contains("\"MemberAdd\""));
+    }
+
+    #[test]
+    fn member_remove_serde_roundtrip() {
+        let delta = Delta::MemberRemove {
+            channel_id: [7; 16],
+            user_id: [8; 16],
+            hlc: test_hlc(3000),
+        };
+        let json = serde_json::to_string(&delta).unwrap();
+        let back: Delta = serde_json::from_str(&json).unwrap();
+        assert_eq!(delta, back);
+        assert!(json.contains("\"MemberRemove\""));
+    }
+
+    #[test]
+    fn member_add_has_hlc() {
+        let hlc = test_hlc(99);
+        let d = Delta::MemberAdd {
+            channel_id: [0; 16],
+            user_id: [0; 16],
+            hlc,
+        };
+        assert_eq!(d.hlc(), Some(&hlc));
     }
 
     #[test]

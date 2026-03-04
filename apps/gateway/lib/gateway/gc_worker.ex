@@ -47,7 +47,7 @@ defmodule Gateway.GcWorker do
 
     case SQL.query(
            Persistence.Repo,
-           "DELETE FROM sync_cursors WHERE updated_at < $1 LIMIT $2",
+           "DELETE FROM sync_cursors WHERE ctid IN (SELECT ctid FROM sync_cursors WHERE updated_at < $1 LIMIT $2)",
            [cutoff, @max_deletes]
          ) do
       {:ok, %{num_rows: n}} -> n

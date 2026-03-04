@@ -11,9 +11,9 @@ defmodule Gateway.Application do
       Gateway.PromEx,
       Gateway.Telemetry,
       Gateway.ConnectionRegistry,
-      Gateway.RateLimiter,
       Gateway.SyncConsumer,
       Gateway.GcWorker,
+      {Task.Supervisor, name: Gateway.TaskSupervisor},
       Gateway.Endpoint
     ]
 

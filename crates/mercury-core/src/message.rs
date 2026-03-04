@@ -27,6 +27,7 @@ pub struct Message {
     pub content_type: ContentType,
     pub reply_to: Option<MessageId>,
     pub created_at: u64,
+    pub edited_at: Option<u64>,
     pub server_received_at: Option<u64>,
 }
 
@@ -80,6 +81,7 @@ mod tests {
             content_type,
             reply_to: None,
             created_at: 1_700_000_000_000,
+            edited_at: None,
             server_received_at: None,
         }
     }

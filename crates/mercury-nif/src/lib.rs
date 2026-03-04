@@ -106,6 +106,7 @@ fn validate_message(
                 .as_millis(),
         )
         .expect("timestamp fits u64"),
+        edited_at: None,
         server_received_at: None,
     };
     match msg.validate() {
@@ -142,6 +143,7 @@ fn validate_channel(
         id: ChannelId::new(),
         channel_type: ct,
         name,
+        member_ids: vec![],
         created_by: UserId::new(),
         created_at: 1,
     };
@@ -156,14 +158,14 @@ fn validate_channel(
 // ---------------------------------------------------------------------------
 
 #[rustler::nif(schedule = "DirtyCpu")]
-fn hlc_tick(wall_clock_ms: u64, counter: u32, node_id: Binary) -> (u64, u32) {
+fn hlc_tick(wall_clock_ms: u64, counter: u32, node_id: Binary) -> NifResult<(u64, u32)> {
     let mut hlc = Hlc {
         wall_clock_ms,
         counter,
-        node_id: parse_uuid_16(node_id).unwrap_or([0; 16]),
+        node_id: parse_uuid_16(node_id)?,
     };
     hlc.tick();
-    (hlc.wall_clock_ms, hlc.counter)
+    Ok((hlc.wall_clock_ms, hlc.counter))
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -174,19 +176,19 @@ fn hlc_merge(
     remote_wall: u64,
     remote_counter: u32,
     remote_node: Binary,
-) -> (u64, u32) {
+) -> NifResult<(u64, u32)> {
     let mut local = Hlc {
         wall_clock_ms: local_wall,
         counter: local_counter,
-        node_id: parse_uuid_16(local_node).unwrap_or([0; 16]),
+        node_id: parse_uuid_16(local_node)?,
     };
     let remote = Hlc {
         wall_clock_ms: remote_wall,
         counter: remote_counter,
-        node_id: parse_uuid_16(remote_node).unwrap_or([0; 16]),
+        node_id: parse_uuid_16(remote_node)?,
     };
     local.merge(&remote);
-    (local.wall_clock_ms, local.counter)
+    Ok((local.wall_clock_ms, local.counter))
 }
 
 // ---------------------------------------------------------------------------
@@ -520,4 +522,4 @@ fn mls_welcome_capnp_decode<'a>(
     ))
 }
 
-rustler::init!("Elixir.Gateway.Native");
+rustler::init!("Elixir.MercuryCore.Native");

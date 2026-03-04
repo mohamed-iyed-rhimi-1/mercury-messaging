@@ -67,9 +67,13 @@ defmodule Gateway.HealthPlug do
   end
 
   defp check_dragonfly do
-    case Redix.command(Persistence.Redis, ["PING"]) do
-      {:ok, "PONG"} -> :ok
-      _ -> :error
+    if Process.whereis(Persistence.Redis) do
+      case Redix.command(Persistence.Redis, ["PING"]) do
+        {:ok, "PONG"} -> :ok
+        _ -> :error
+      end
+    else
+      :error
     end
   rescue
     _ -> :error

@@ -151,7 +151,7 @@ describe("Channel", () => {
     const transport = createMockTransport();
     const channel = new Channel(transport as unknown as BinaryTransport, "general", new Uint8Array(16), new Uint8Array(16));
     await channel.join();
-    const result = await channel.pushDeltas([{ type: "MessageAppend" }]);
+    const result = await channel.pushDeltas([{ type: "MessageAppend", message_id: "00".repeat(16), hlc_wall: Date.now() }]);
     expect(result.accepted).toBe(0);
   });
 });

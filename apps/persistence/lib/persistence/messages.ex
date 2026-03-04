@@ -1,5 +1,8 @@
 defmodule Persistence.Messages do
   @moduledoc "ScyllaDB message storage — write and paginated read."
+  require Logger
+
+  @xandra_timeout 5_000
 
   @insert_cql """
   INSERT INTO mercury.messages
@@ -43,7 +46,7 @@ defmodule Persistence.Messages do
       {"bigint", now}
     ]
 
-    case Xandra.Cluster.execute(Persistence.Scylla, @insert_cql, values) do
+    case Xandra.Cluster.execute(Persistence.Scylla, @insert_cql, values, timeout: @xandra_timeout) do
       {:ok, _} -> :ok
       {:error, _} = err -> err
     end
@@ -58,7 +61,7 @@ defmodule Persistence.Messages do
       {"int", limit}
     ]
 
-    case Xandra.Cluster.execute(Persistence.Scylla, @select_cql, values) do
+    case Xandra.Cluster.execute(Persistence.Scylla, @select_cql, values, timeout: @xandra_timeout) do
       {:ok, page} ->
         msgs =
           Enum.map(page, fn row ->
@@ -103,19 +106,24 @@ defmodule Persistence.Messages do
   end
 
   defp read_recent_from_scylla(tenant_id, channel_id, limit) do
-    now_bucket = Gateway.Native.compute_time_bucket(System.os_time(:millisecond))
+    now_bucket = MercuryCore.Native.compute_time_bucket(System.os_time(:millisecond))
 
     case read(tenant_id, channel_id, now_bucket, limit) do
       {:ok, msgs} when length(msgs) < limit ->
         case read(tenant_id, channel_id, now_bucket - 1, limit - length(msgs)) do
-          {:ok, older} -> {:ok, msgs ++ older}
-          {:error, _} -> {:ok, msgs}
+          {:ok, older} ->
+            {:ok, msgs ++ older}
+
+          {:error, reason} ->
+            Logger.warning("ScyllaDB read older bucket failed: #{inspect(reason)}")
+            {:ok, msgs}
         end
 
       {:ok, msgs} ->
         {:ok, msgs}
 
-      {:error, _} ->
+      {:error, reason} ->
+        Logger.warning("ScyllaDB read current bucket failed: #{inspect(reason)}")
         {:ok, []}
     end
   end

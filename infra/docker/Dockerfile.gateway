@@ -28,6 +28,7 @@ ENV MIX_ENV=prod
 
 # Deps first (cache layer)
 COPY mix.exs mix.lock ./
+COPY apps/mercury_core/mix.exs apps/mercury_core/mix.exs
 COPY apps/gateway/mix.exs apps/gateway/mix.exs
 COPY apps/persistence/mix.exs apps/persistence/mix.exs
 COPY apps/presence/mix.exs apps/presence/mix.exs
@@ -41,7 +42,7 @@ COPY rel/ rel/
 
 # Copy the Linux NIF from rust-builder into the expected priv path
 COPY --from=rust-builder /build/target/release/libmercury_nif.so \
-     apps/gateway/priv/native/libmercury_nif.so
+     apps/mercury_core/priv/native/libmercury_nif.so
 
 # Rustler needs Cargo.toml to exist even with skip_compilation
 COPY Cargo.toml Cargo.lock ./

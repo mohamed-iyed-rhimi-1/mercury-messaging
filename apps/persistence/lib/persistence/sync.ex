@@ -6,8 +6,10 @@ defmodule Persistence.Sync do
 
   alias Persistence.{Repo, Schema.SyncCursor}
   import Ecto.Query
+  require Logger
 
   @max_deltas 100
+  @xandra_timeout 5_000
 
   @doc "Fetch deltas for a channel since a given HLC timestamp."
   @spec get_deltas(binary(), binary(), non_neg_integer(), pos_integer()) ::
@@ -17,8 +19,8 @@ defmodule Persistence.Sync do
 
     # Query messages after the given timestamp across recent buckets
     now_ms = System.system_time(:millisecond)
-    current_bucket = Gateway.Native.compute_time_bucket(now_ms)
-    since_bucket = Gateway.Native.compute_time_bucket(max(since_hlc_wall, 0))
+    current_bucket = MercuryCore.Native.compute_time_bucket(now_ms)
+    since_bucket = MercuryCore.Native.compute_time_bucket(max(since_hlc_wall, 0))
 
     deltas =
       since_bucket..current_bucket
@@ -65,26 +67,29 @@ defmodule Persistence.Sync do
   end
 
   @doc "Update sync cursor for a device."
-  @spec update_cursor(Ecto.UUID.t(), Ecto.UUID.t(), Ecto.UUID.t(), Ecto.UUID.t(), map()) :: :ok
+  @spec update_cursor(Ecto.UUID.t(), Ecto.UUID.t(), Ecto.UUID.t(), Ecto.UUID.t(), map()) ::
+          :ok | {:error, term()}
   def update_cursor(tenant_id, user_id, device_id, channel_id, hlc) do
     now = DateTime.utc_now()
 
-    Repo.insert!(
-      %SyncCursor{
-        tenant_id: tenant_id,
-        user_id: user_id,
-        device_id: device_id,
-        channel_id: channel_id,
-        last_hlc_wall: Map.get(hlc, :wall, 0),
-        last_hlc_counter: Map.get(hlc, :counter, 0),
-        last_hlc_node: Map.get(hlc, :node, <<0>>),
-        updated_at: now
-      },
-      on_conflict: {:replace, [:last_hlc_wall, :last_hlc_counter, :last_hlc_node, :updated_at]},
-      conflict_target: [:tenant_id, :user_id, :device_id, :channel_id]
-    )
-
-    :ok
+    case Repo.insert(
+           %SyncCursor{
+             tenant_id: tenant_id,
+             user_id: user_id,
+             device_id: device_id,
+             channel_id: channel_id,
+             last_hlc_wall: Map.get(hlc, :wall, 0),
+             last_hlc_counter: Map.get(hlc, :counter, 0),
+             last_hlc_node: Map.get(hlc, :node, <<0>>),
+             updated_at: now
+           },
+           on_conflict:
+             {:replace, [:last_hlc_wall, :last_hlc_counter, :last_hlc_node, :updated_at]},
+           conflict_target: [:tenant_id, :user_id, :device_id, :channel_id]
+         ) do
+      {:ok, _} -> :ok
+      {:error, _} = err -> err
+    end
   end
 
   @doc "Get sync cursors for all channels of a device."
@@ -115,7 +120,8 @@ defmodule Persistence.Sync do
            ORDER BY message_id DESC
            LIMIT ?
            """,
-           values
+           values,
+           timeout: @xandra_timeout
          ) do
       {:ok, page} ->
         page
@@ -123,7 +129,8 @@ defmodule Persistence.Sync do
         |> Enum.filter(&(row_timestamp(&1) > since_ts))
         |> Enum.map(&row_to_delta/1)
 
-      {:error, _} ->
+      {:error, reason} ->
+        Logger.warning("Sync fetch_messages_after failed for bucket #{bucket}: #{inspect(reason)}")
         []
     end
   end
@@ -151,7 +158,7 @@ defmodule Persistence.Sync do
     sender_id = decode_hex_or_default(delta["sender_id"])
     content = decode_b64_or_raw(delta["encrypted_content"])
     ts = delta["hlc_wall"] || System.system_time(:millisecond)
-    bucket = Gateway.Native.compute_time_bucket(ts)
+    bucket = MercuryCore.Native.compute_time_bucket(ts)
 
     Persistence.Messages.write(tenant_id, channel_id, bucket, %{
       message_id: msg_id,
@@ -164,46 +171,56 @@ defmodule Persistence.Sync do
   end
 
   defp apply_single_delta(tenant_id, channel_id, %{"type" => "ReactionAdd"} = delta) do
-    msg_id = Base.decode16!(delta["message_id"], case: :mixed)
-    user_id = Base.decode16!(delta["user_id"], case: :mixed)
+    with {:ok, msg_id} <- Base.decode16(delta["message_id"] || "", case: :mixed),
+         {:ok, user_id} <- Base.decode16(delta["user_id"] || "", case: :mixed) do
+      values = [
+        {"blob", tenant_id},
+        {"blob", channel_id},
+        {"blob", msg_id},
+        {"blob", user_id},
+        {"text", delta["emoji"]}
+      ]
 
-    values = [
-      {"blob", tenant_id},
-      {"blob", channel_id},
-      {"blob", msg_id},
-      {"blob", user_id},
-      {"text", delta["emoji"]}
-    ]
+      _ =
+        Xandra.Cluster.execute(
+          Persistence.Scylla,
+          """
+          INSERT INTO mercury.reactions
+            (tenant_id, channel_id, message_id, user_id, emoji, created_at)
+          VALUES (?, ?, ?, ?, ?, toTimestamp(now()))
+          """,
+          values,
+          timeout: @xandra_timeout
+        )
 
-    _ =
-      Xandra.Cluster.execute(
-        Persistence.Scylla,
-        """
-        INSERT INTO mercury.reactions
-          (tenant_id, channel_id, message_id, user_id, emoji, created_at)
-        VALUES (?, ?, ?, ?, ?, toTimestamp(now()))
-        """,
-        values
-      )
-
-    :ok
+      :ok
+    else
+      _ ->
+        Logger.warning("Sync ReactionAdd: invalid hex in delta, skipping")
+        :ok
+    end
   end
 
   defp apply_single_delta(tenant_id, _channel_id, %{"type" => "ReadPositionUpdate"} = delta) do
-    user_id = Base.decode16!(delta["user_id"], case: :mixed)
-    channel_id = Base.decode16!(delta["channel_id"], case: :mixed)
-    msg_id = Base.decode16!(delta["last_read_message_id"], case: :mixed)
-    Persistence.ReadPositions.update(tenant_id, user_id, channel_id, msg_id)
+    with {:ok, user_id} <- Base.decode16(delta["user_id"] || "", case: :mixed),
+         {:ok, channel_id} <- Base.decode16(delta["channel_id"] || "", case: :mixed),
+         {:ok, msg_id} <- Base.decode16(delta["last_read_message_id"] || "", case: :mixed) do
+      Persistence.ReadPositions.update(tenant_id, user_id, channel_id, msg_id)
+    else
+      _ ->
+        Logger.warning("Sync ReadPositionUpdate: invalid hex in delta, skipping")
+        :ok
+    end
   end
 
   defp apply_single_delta(_tenant_id, _channel_id, _delta), do: :ok
 
-  defp decode_hex_or_generate(nil), do: Gateway.Native.generate_message_id()
+  defp decode_hex_or_generate(nil), do: MercuryCore.Native.generate_message_id()
 
   defp decode_hex_or_generate(hex) do
     case Base.decode16(hex, case: :mixed) do
       {:ok, bin} -> bin
-      :error -> Gateway.Native.generate_message_id()
+      :error -> MercuryCore.Native.generate_message_id()
     end
   end
 

@@ -1029,9 +1029,8 @@ mercury/
 │   ├── mercury-core/           # Domain types, validation, shared logic
 │   ├── mercury-crypto/         # MLS encryption, key management
 │   ├── mercury-crdt/           # CRDT implementations, HLC clocks
-│   ├── mercury-db/             # ScyllaDB + PostgreSQL clients
 │   ├── mercury-nif/            # Rustler NIFs for Elixir interop
-│   └── mercury-transport/      # QUIC/WebTransport server
+│   └── mercury-transport/      # QUIC/WebTransport server (deferred)
 ├── apps/                       # Elixir OTP applications
 │   ├── gateway/                # Phoenix-based WebTransport gateway
 │   ├── presence/               # User presence tracking
@@ -1265,18 +1264,8 @@ Implement durable message storage (ScyllaDB), user data (PostgreSQL + Citus), ca
 
 ### Steps
 
-#### 3.1 — `mercury-db` Crate (Rust)
-Database client abstractions with connection pooling and retry logic.
-
-Deliverables:
-- `ScyllaClient`: Wrapper around `scylla-rust-driver`.
-  - Connection pool: Pre-allocated, bounded (NASA Rule #3).
-  - Prepared statements: All queries prepared at startup, not at request time.
-  - Retry policy: Exponential backoff, max 3 retries, circuit breaker after 10 consecutive failures.
-  - Metrics: Query latency histogram, error counter, connection pool utilization (OpenTelemetry).
-- `PostgresClient`: Wrapper around `sqlx` with Citus-aware sharding.
-  - Shard key: `user_id` for user tables, `channel_id` for channel tables.
-  - Migration runner: `sqlx migrate` integrated into CI.
+#### 3.1 — Persistence (Elixir)
+Database access is handled by the Elixir `apps/persistence/` application using Ecto and native ScyllaDB/PostgreSQL drivers. There is no Rust `mercury-db` crate — Ecto is idiomatic for the Phoenix stack, while Rust NIFs handle compute-intensive operations (crypto, CRDT, validation).
 
 #### 3.2 — ScyllaDB Schema (Messages)
 Time-bucketed message storage.
@@ -1695,36 +1684,12 @@ Deliverables:
   - Upload KeyPackages to server on device registration.
   - Server stores KeyPackages in PostgreSQL (`devices.mls_key_package`).
   - Clients fetch KeyPackages when adding members to groups.
-- `KeySchedule`: Automatic key rotation.
-  - Rotate group key every 100 messages or 24 hours (whichever comes first).
-  - Forward secrecy: Old keys are deleted after rotation.
-  - Post-compromise security: New keys are derived from fresh randomness.
-
 Key design decisions:
 - Use `openmls` with `rust-crypto` backend (not OpenSSL — fewer dependencies, auditable).
 - All crypto operations run on Rust dirty schedulers when called via NIF (never block BEAM).
-- Group state stored locally in SQLCipher (mobile) or encrypted file (desktop/web).
 - Server never sees plaintext or group keys — only encrypted MLS messages and public KeyPackages.
 
-#### 4.2 — Sealed Sender Implementation
-Prevent the server from learning who is messaging whom.
-
-Deliverables:
-- `SealedSenderEnvelope`: Outer encryption layer using the server's public key.
-  - Client encrypts `{sender_id, encrypted_mls_message}` with server's ephemeral key.
-  - Server decrypts outer layer to get routing info, forwards inner MLS ciphertext.
-  - Server immediately discards sender identity after routing.
-- `EphemeralKeyRotation`: Server rotates its sealed-sender key every hour.
-- Metadata minimization: Server logs only `{channel_id, timestamp, message_size}` — no sender, no IP (after initial TLS termination).
-
-#### 4.3 — Key Transparency (Audit)
-Allow users to verify that the server hasn't tampered with KeyPackages.
-
-Deliverables:
-- `KeyTransparencyLog`: Append-only Merkle tree of all KeyPackage uploads.
-  - Clients can audit that their KeyPackage wasn't substituted (MITM protection).
-  - Log stored in Redpanda for durability and third-party auditing.
-- `DeviceVerification`: Out-of-band verification (QR code / safety number comparison, like Signal).
+> **Deferred:** Sealed sender, key transparency, and automatic key rotation are future enhancements not included in the current implementation.
 
 #### 4.4 — NIF Updates
 Expose new crypto functions to Elixir.
@@ -1735,7 +1700,6 @@ New NIFs:
 - `mls_decrypt(group_state, ciphertext) -> {:ok, plaintext, updated_state} | {:error, reason}`
 - `mls_add_member(group_state, key_package) -> {:ok, welcome, commit, updated_state} | {:error, reason}`
 - `mls_remove_member(group_state, leaf_index) -> {:ok, commit, updated_state} | {:error, reason}`
-- `unseal_sender(sealed_envelope, server_private_key) -> {:ok, sender_id, inner_ciphertext} | {:error, reason}`
 
 All NIFs run on dirty CPU schedulers. Crypto operations are bounded: max 10ms per call (NASA Rule #2), with timeout errors if exceeded.
 
@@ -1744,12 +1708,9 @@ All NIFs run on dirty CPU schedulers. Crypto operations are bounded: max 10ms pe
 - [ ] MLS group creation, member add/remove, encrypt/decrypt work correctly
 - [ ] Forward secrecy verified: Compromising current key doesn't reveal past messages
 - [ ] Post-compromise security verified: New messages secure after key compromise + rotation
-- [ ] Sealed sender: Server logs contain no sender identity
-- [ ] Key rotation happens automatically at configured intervals
 - [ ] Crypto benchmarks: encrypt <2ms, decrypt <2ms, group operations <5ms
 - [ ] Third-party security audit scheduled (or self-audit with `cargo audit` + fuzzing)
 - [ ] ADR-007: "Why MLS over Signal Protocol for group encryption"
-- [ ] ADR-008: "Sealed sender trade-offs and threat model"
 
 ---
 
@@ -1760,20 +1721,7 @@ Enable full offline operation. Users can read, compose, and edit messages withou
 
 ### Steps
 
-#### 5.1 — Local Storage Layer
-Implement encrypted local databases on each platform.
-
-Deliverables:
-- `LocalStore` trait (Rust, compiled to each target):
-  - `write_message(message) -> Result<()>` — Write to local SQLite.
-  - `read_messages(channel_id, range) -> Result<Vec<Message>>` — Paginated read.
-  - `get_sync_state(channel_id) -> Result<SyncState>` — Last known HLC for delta sync.
-  - `apply_delta(delta) -> Result<()>` — Merge incoming CRDT delta into local state.
-- SQLCipher integration: Database encrypted at rest with key derived from user passphrase + platform keychain (iOS Keychain, Android Keystore).
-- Schema mirrors ScyllaDB message table structure for consistency.
-- Write-ahead log (WAL) mode enabled for crash safety.
-
-#### 5.2 — Delta Sync Protocol
+#### 5.1 — Delta Sync Protocol
 Implement efficient sync that only transfers changes.
 
 Deliverables:
@@ -1791,7 +1739,7 @@ Deliverables:
   7. Server merges and fans out to other devices/users.
 - Bounded sync: Maximum 10,000 deltas per sync request (NASA Rule #2). If more exist, paginate with continuation token.
 
-#### 5.3 — Conflict Resolution Rules
+#### 5.2 — Conflict Resolution Rules
 Define deterministic merge behavior for every data type.
 
 | Data Type | CRDT | Conflict Rule |
@@ -1804,7 +1752,7 @@ Define deterministic merge behavior for every data type.
 | Reactions | `ReactionMap` (`ORSet<(UserId, Emoji)>`) | Add/remove tracked per message. Concurrent add+remove of same reaction → add wins. One reaction per user per emoji enforced by set semantics. |
 | Typing indicators | Ephemeral (no CRDT) | Not persisted. Only broadcast to online users via NATS. |
 
-#### 5.4 — Multi-Device Sync
+#### 5.3 — Multi-Device Sync
 Ensure all of a user's devices converge to the same state.
 
 Deliverables:
@@ -1814,27 +1762,14 @@ Deliverables:
 - Device B (if offline) syncs on reconnect via `SyncRequest`.
 - MLS group state must also sync across devices — each device has its own leaf in the MLS tree, but they share the same group view.
 
-#### 5.5 — Offline Queue (Client-Side)
-Queue outbound messages when offline.
-
-Deliverables:
-- `OfflineQueue`: Persistent queue in SQLite.
-  - Messages written with `pending` status.
-  - On reconnect, queue is drained in HLC order.
-  - Server acknowledges each message. Client marks as `delivered`.
-  - Retry with exponential backoff on failure. Max 3 retries per message.
-  - Queue bounded to 10,000 messages (NASA Rule #2). Oldest dropped if exceeded (with user notification).
-
 ### Acceptance Criteria
 - [ ] User can compose and send 100 messages offline, all delivered correctly on reconnect
 - [ ] Two devices editing the same message offline converge to the same state after sync
 - [ ] Delta sync transfers <500KB for 10,000 messages (vs ~5MB full fetch)
 - [ ] Sync completes in <1 second for 24h offline gap (10K messages)
 - [ ] No data loss in any concurrent edit scenario (verified by property-based tests)
-- [ ] SQLCipher encryption verified — database unreadable without key
 - [ ] Multi-device sync works across all SDK platforms (iOS, Android, Web)
 - [ ] ADR-009: "CRDT conflict resolution rules and trade-offs"
-- [ ] ADR-010: "Offline queue bounds and overflow strategy"
 
 ---
 
@@ -1853,9 +1788,6 @@ Deliverables:
   - Message creation, validation, Cap'n Proto serialization.
   - MLS encrypt/decrypt (via `mercury-crypto`).
   - CRDT merge, HLC operations (via `mercury-crdt`).
-  - SQLCipher local store (via `mercury-db`).
-  - Delta sync protocol (offline queue, sync state machine).
-  - Connection state machine (connect, authenticate, reconnect with backoff).
 - Compiled to three targets:
   - `UniFFI` → generates Swift bindings (iOS) and Kotlin bindings (Android).
   - `wasm-bindgen` → generates TypeScript bindings (Web).
@@ -1921,40 +1853,7 @@ channel.messages.collect { message ->
 
 - Documentation: Dokka with integration guide and code samples.
 
-#### 6.4 — JavaScript SDK (npm Package)
-TypeScript wrapper with WASM core, distributed via npm.
-
-Deliverables:
-- `@mercury/sdk` npm package wrapping `mercury-sdk-core` via `wasm-bindgen`.
-- WASM module loaded as Web Worker (crypto + CRDT off main thread).
-- Platform-specific layer:
-  - Transport: WebTransport (with WebSocket fallback).
-  - Key storage: `SubtleCrypto` for key derivation, IndexedDB for encrypted state.
-  - Push: Web Push API integration.
-  - Offline: Service Worker for background sync via `SyncManager`.
-- Public API (idiomatic TypeScript):
-
-```typescript
-import { MercuryClient } from '@mercury/sdk'
-
-const client = new MercuryClient({
-    tenantId: '<tenant-id>',
-    apiKey: '<api-key>'
-})
-await client.connect()
-
-const channel = client.channel('general')
-await channel.send('hello')
-
-channel.onMessage((message) => {
-    console.log(`${message.sender}: ${message.text}`)
-})
-```
-
-- Bundle size target: <200KB gzipped (WASM + JS glue).
-- Documentation: TypeDoc with integration guide and code samples.
-
-#### 6.5 — SDK Documentation Site
+#### 6.4 — SDK Documentation Site
 Developer-facing documentation for SDK integration.
 
 Deliverables:
@@ -1967,7 +1866,6 @@ Deliverables:
 ### Acceptance Criteria
 - [ ] iOS SDK: <5MB binary size, integrates via SPM in <10 minutes
 - [ ] Android SDK: <5MB AAR size, integrates via Gradle in <10 minutes
-- [ ] JS SDK: <200KB gzipped, installs via `npm install` in <5 minutes
 - [ ] All SDKs: Send/receive messages with E2EE, offline compose, delta sync
 - [ ] All SDKs: Consistent CRDT merge behavior (cross-platform integration tests)
 - [ ] All SDKs: Push token registration works on each platform
@@ -2275,12 +2173,11 @@ Key dependencies:
 - Phoenix frame itself remains JSON (Phoenix Channels protocol requirement)
 - NATS events and Redpanda audit log use JSON (appropriate for those use cases)
 
-#### JS SDK — Offline-first with MLS
+#### JS SDK — Complete (`sdks/mercury-sdk-js/`)
 - MlsClient: WASM-based E2EE (create identity, key packages, groups, encrypt/decrypt)
 - PhoenixTransport: WebSocket with reconnect callbacks, isConnected()
-- Channel: offline queueing via SyncEngine when disconnected
-- MercuryClient: enableOfflineSupport(), auto-sync on reconnect
-- LocalStore + SyncEngine + OfflineQueue: IndexedDB-backed offline-first
+- Channel: message send/receive, typing indicators, read receipts
+- MercuryClient: connection management, channel lifecycle
 - 37 tests passing, tsc clean
 
 #### Infrastructure — Observability stack deployed
@@ -2308,7 +2205,7 @@ Key dependencies:
 |-----|-------------------|---------------|----------|
 | QUIC/WebTransport | Primary transport | WebSocket via Phoenix Channels | Deferred — requires replacing Phoenix transport layer entirely |
 | Envoy service mesh | mTLS between services | No service mesh | Deferred — premature for current scale, k3s network policies sufficient |
-| mercury-db crate | Rust DB clients | Elixir handles DB via Ecto | By design — Ecto is idiomatic for Phoenix, Rust NIFs handle compute |
+| Persistence | Rust DB clients (planned) | Elixir handles DB via Ecto (`apps/persistence/`) | By design — Ecto is idiomatic for Phoenix, Rust NIFs handle compute |
 | mercury-transport crate | Rust QUIC server | Phoenix WebSocket | Deferred — same as QUIC above |
 
 ### Test Counts
@@ -2326,3 +2223,7 @@ Key dependencies:
 The one thing to watch: Phoenix.Channel had built-in backpressure via its internal message queue monitoring. Your BinarySocket doesn't have that yet — if a slow
 client can't keep up with broadcasts, messages will pile up in the process mailbox. That's not a concurrency issue, it's a flow control issue you'd want to add if
 you hit scale (check Process.info(self(), :message_queue_len) periodically and disconnect if it exceeds a threshold).
+
+
+The fanout app is completely empty (supervisor with zero children). All fan-out is done inline in BinarySocket via PubSub. What should I do with it?
+remove _bin prefix

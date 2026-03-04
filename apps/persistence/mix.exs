@@ -30,7 +30,8 @@ defmodule Persistence.MixProject do
       {:redix, "~> 1.5"},
       {:gnat, "~> 1.8"},
       {:jason, "~> 1.4"},
-      {:brod, "~> 4.0"}
+      {:brod, "~> 4.0"},
+      {:mercury_core, in_umbrella: true}
     ]
   end
 

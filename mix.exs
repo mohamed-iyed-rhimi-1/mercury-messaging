@@ -21,6 +21,7 @@ defmodule Mercury.MixProject do
         applications: [
           opentelemetry_exporter: :permanent,
           opentelemetry: :temporary,
+          mercury_core: :permanent,
           gateway: :permanent,
           persistence: :permanent,
           presence: :permanent,
