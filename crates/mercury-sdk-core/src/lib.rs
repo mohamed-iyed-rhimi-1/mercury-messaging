@@ -124,6 +124,27 @@ impl MlsManager {
             .process_commit(group_id, commit)
             .map_err(|e| JsError::new(&format!("processCommit: {e}")))
     }
+
+    /// Remove a member from a group by leaf index. Returns the commit bytes.
+    #[wasm_bindgen(js_name = "removeMember")]
+    pub fn remove_member(
+        &mut self,
+        group_id: &[u8],
+        member_index: u32,
+    ) -> Result<Vec<u8>, JsError> {
+        self.inner
+            .remove_member(group_id, member_index)
+            .map_err(|e| JsError::new(&format!("removeMember: {e}")))
+    }
+
+    /// Get the number of members in a group.
+    #[wasm_bindgen(js_name = "memberCount")]
+    pub fn member_count(&self, group_id: &[u8]) -> Result<u32, JsError> {
+        self.inner
+            .member_count(group_id)
+            .map(|n| u32::try_from(n).expect("member count fits u32"))
+            .ok_or_else(|| JsError::new("group not found"))
+    }
 }
 
 /// Generate an MLS `KeyPackage` for this device identity (standalone, no state).

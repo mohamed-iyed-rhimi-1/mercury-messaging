@@ -8,7 +8,7 @@
  * 4. Update sync cursor
  */
 
-import type { LocalStore, StoredMessage } from "./store";
+import type { LocalStore } from "./store";
 import type { Channel } from "./channel";
 import { OfflineQueue } from "./offline-queue";
 
@@ -47,7 +47,7 @@ export class SyncEngine {
             sender: d.sender_id as string,
             content: d.encrypted_content as string,
             contentType: d.content_type as number,
-            timestamp: (d.hlc as Record<string, number>)?.wall_clock_ms ?? Date.now(),
+            timestamp: (d.hlc_wall as number) ?? Date.now(),
           });
           received += 1;
         }

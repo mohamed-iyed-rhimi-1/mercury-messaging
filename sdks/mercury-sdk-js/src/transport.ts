@@ -7,12 +7,12 @@ import {
   encodeFrame,
   decodeFrame,
   FRAME_JOIN,
-  FRAME_LEAVE,
   FRAME_REPLY,
   FRAME_PUSH,
   FRAME_BROADCAST,
   FRAME_HEARTBEAT,
   STATUS_OK,
+  STATUS_ERROR,
 } from "./frame";
 
 const HEARTBEAT_INTERVAL = 30_000;
@@ -34,6 +34,7 @@ export class BinaryTransport {
   private reconnectAttempt = 0;
   private closed = false;
   private reconnectCallbacks: ReconnectCallback[] = [];
+  private pendingJoinRefs = new Map<number, string>();
 
   private deferredBindings = new Map<string, EventCallback[]>();
 
@@ -79,15 +80,23 @@ export class BinaryTransport {
     this.joinedTopics.clear();
     this.topicNameToId.clear();
     this.topicIdToName.clear();
+    // Reject all pending replies so callers don't hang
+    for (const [ref, cb] of this.pendingReplies) {
+      cb(STATUS_ERROR, new TextEncoder().encode("disconnected"));
+    }
+    this.pendingReplies.clear();
+    this.pendingJoinRefs.clear();
   }
 
   join(topic: string): Promise<void> {
     return new Promise((resolve, reject) => {
       const ref = this.nextRef();
       const topicBytes = new TextEncoder().encode(topic);
-      // Add to joinedTopics BEFORE sending so handleMessage can map the topic ID
+      // Add to joinedTopics BEFORE sending so reconnect can rejoin
       this.joinedTopics.add(topic);
+      this.pendingJoinRefs.set(ref, topic);
       this.pendingReplies.set(ref, (status, data) => {
+        this.pendingJoinRefs.delete(ref);
         if (status === STATUS_OK) {
           resolve();
         } else {
@@ -113,7 +122,10 @@ export class BinaryTransport {
         else reject(new Error(`Push failed: ${new TextDecoder().decode(data)}`));
       });
       const frame = encodeFrame(FRAME_PUSH, ref, topicId, concat(new Uint8Array([event]), payload));
-      this.send(frame);
+      if (!this.send(frame)) {
+        this.pendingReplies.delete(ref);
+        reject(new Error("Not connected"));
+      }
     });
   }
 
@@ -130,6 +142,7 @@ export class BinaryTransport {
     const existing = this.topicNameToId.get(topic);
     if (existing !== undefined) {
       this.on(existing, event, callback);
+      return;
     }
     const key = `${topic}:${event}`;
     if (!this.deferredBindings.has(key)) this.deferredBindings.set(key, []);
@@ -164,14 +177,11 @@ export class BinaryTransport {
       if (cb) {
         // If this is a join reply (topicId > 0 and status OK), register mapping
         if (frame.topicId > 0 && status === STATUS_OK) {
-          // Find which topic this join was for
-          for (const topic of this.joinedTopics) {
-            if (!this.topicNameToId.has(topic)) {
-              this.topicNameToId.set(topic, frame.topicId);
-              this.topicIdToName.set(frame.topicId, topic);
-              this.resolveDeferredBindings(topic, frame.topicId);
-              break;
-            }
+          const topic = this.pendingJoinRefs.get(frame.ref);
+          if (topic) {
+            this.topicNameToId.set(topic, frame.topicId);
+            this.topicIdToName.set(frame.topicId, topic);
+            this.resolveDeferredBindings(topic, frame.topicId);
           }
         }
         this.pendingReplies.delete(frame.ref);
@@ -190,18 +200,22 @@ export class BinaryTransport {
   }
 
   private resolveDeferredBindings(topic: string, topicId: number): void {
+    const prefix = `${topic}:`;
     for (const [key, callbacks] of this.deferredBindings) {
-      if (key.startsWith(`${topic}:`)) {
+      if (key.startsWith(prefix)) {
         const event = parseInt(key.split(":").pop()!, 10);
         for (const cb of callbacks) this.on(topicId, event, cb);
+        this.deferredBindings.delete(key);
       }
     }
   }
 
-  private send(data: Uint8Array): void {
+  private send(data: Uint8Array): boolean {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(data);
+      return true;
     }
+    return false;
   }
 
   private nextRef(): number {

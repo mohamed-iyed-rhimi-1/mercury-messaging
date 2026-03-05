@@ -11,23 +11,23 @@ import {
 } from "./codec";
 import {
   EV_MSG_SEND, EV_MSG_NEW, EV_MSG_HISTORY, EV_MSG_TYPING, EV_MSG_READ,
-  EV_MLS_KEY_PACKAGE, EV_MLS_FETCH_KP, EV_MLS_COMMIT, EV_MLS_WELCOME, EV_MLS_REMOVE,
+  EV_MLS_KEY_PACKAGE, EV_MLS_FETCH_KP, EV_MLS_COMMIT, EV_MLS_WELCOME,
   EV_MLS_MEMBERS, EV_MLS_GROUP_INFO, EV_MLS_CEK, EV_PRESENCE_JOIN,
-  EV_SYNC_REQUEST, EV_SYNC_PUSH, EV_SYNC_CURSOR, EV_CH_CREATE,
+  EV_SYNC_REQUEST, EV_SYNC_PUSH,
   packEnvelopes, unpackEnvelopes,
 } from "./frame";
 import type { MlsClient } from "./mls";
 
 /**
- * A channel represents a conversation. Uses raw binary frames
- * with Cap'n Proto envelopes. No JSON, no base64 on the wire.
+ * A channel represents a conversation. All messages are E2EE via MLS.
+ * Call join() and await it before sending — it blocks until the MLS
+ * handshake completes.
  */
 export class Channel {
   private topic: string;
   private messageHandlers: MessageHandler[] = [];
   private typingHandlers: TypingHandler[] = [];
   private readHandlers: ReadHandler[] = [];
-  public mls: MlsClient | null = null;
   public syncEngine: SyncEngine | null = null;
   private channelIdBytes: Uint8Array;
   private mlsReady = false;
@@ -39,6 +39,7 @@ export class Channel {
     private channelId: string,
     private tenantId: Uint8Array,
     private userId: Uint8Array,
+    private mls: MlsClient,
   ) {
     this.topic = `channel:${channelId}`;
     this.channelIdBytes = hexToBytes(channelId);
@@ -47,40 +48,25 @@ export class Channel {
   async join(): Promise<void> {
     await this.transport.join(this.topic);
 
+    // ── Register event handlers ──
+
     this.transport.onByName(this.topic, EV_MSG_NEW, (data) => {
       const env = decodeEnvelope(data);
       const senderId = bytesToHex(env.senderId);
       const myId = bytesToHex(this.userId);
-      // Skip own messages — already displayed optimistically on send
       if (senderId === myId) return;
-      console.log("[MSG] Received from:", senderId.slice(0, 8), "mlsReady:", this.mlsReady, "payload len:", env.payload.length);
-      let payload = env.payload;
-      if (this.mls && this.mlsReady) {
-        this.mls.decrypt(this.channelIdBytes, payload)
-          .then((pt) => {
-            const msg: Message = {
-              id: bytesToHex(env.messageId),
-              sender: bytesToHex(env.senderId),
-              content: new TextDecoder().decode(pt),
-              contentType: 0,
-              timestamp: Number(env.timestamp),
-            } as Message;
-            for (const h of this.messageHandlers) h(msg);
-          })
-          .catch(() => { /* undecryptable */ });
-      } else if (this.mls && !this.mlsReady) {
-        return; // Drop messages until MLS is established
-      } else {
-        // No MLS — plaintext
-        const msg: Message = {
-          id: bytesToHex(env.messageId),
-          sender: bytesToHex(env.senderId),
-          content: new TextDecoder().decode(payload),
-          contentType: 0,
-          timestamp: Number(env.timestamp),
-        } as Message;
-        for (const h of this.messageHandlers) h(msg);
-      }
+      this.mls.decrypt(this.channelIdBytes, env.payload)
+        .then((pt) => {
+          const msg: Message = {
+            id: bytesToHex(env.messageId),
+            sender: bytesToHex(env.senderId),
+            content: new TextDecoder().decode(pt),
+            contentType: 0,
+            timestamp: Number(env.timestamp),
+          } as Message;
+          for (const h of this.messageHandlers) h(msg);
+        })
+        .catch(() => { /* undecryptable */ });
     });
 
     this.transport.onByName(this.topic, EV_MSG_TYPING, (data) => {
@@ -94,102 +80,68 @@ export class Channel {
     });
 
     this.transport.onByName(this.topic, EV_MLS_COMMIT, (data) => {
-      if (!this.mls) return;
       try {
         const commit = decodeMlsCommit(data);
         this.mls.processCommit(this.channelIdBytes, commit);
       } catch { /* own commit or not in group yet */ }
     });
 
-    // Welcome handler: when the group creator adds us, we receive the Welcome
     this.transport.onByName(this.topic, EV_MLS_WELCOME, (data) => {
-      if (!this.mls || this.mlsReady) return;
+      if (this.mlsReady) return;
       try {
-        // payload: <<uid_len:16LE, uid, welcome_capnp>>
         const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
         const uidLen = view.getUint16(0, true);
         const targetUid = data.subarray(2, 2 + uidLen);
-        // Only process if this Welcome is for us
         if (bytesToHex(targetUid) !== bytesToHex(this.userId)) return;
         const welcomeCapnp = data.subarray(2 + uidLen);
         const { welcome } = decodeMlsWelcome(welcomeCapnp);
-        console.log("[MLS] Processing Welcome, data len:", welcome.length);
         this.mls.processWelcome(welcome);
-        console.log("[MLS] Welcome processed OK — waiting for CEK");
-        // Don't set mlsReady yet — wait for CEK
       } catch (e) { console.error("[MLS] Welcome error:", e); }
     });
 
-    // CEK handler: receive MLS-encrypted channel encryption key from creator
     this.transport.onByName(this.topic, EV_MLS_CEK, (data) => {
-      if (!this.mls || this.mlsReady) return;
-      console.log("[MLS] Received CEK broadcast, len:", data.length);
+      if (this.mlsReady) return;
       this.mls.tryDecryptCek(this.channelIdBytes, data)
-        .then((wasCek) => {
-          console.log("[MLS] tryDecryptCek result:", wasCek);
-          if (wasCek) this.setMlsReady();
-        })
+        .then((wasCek) => { if (wasCek) this.setMlsReady(); })
         .catch((e) => { console.error("[MLS] CEK decrypt error:", e); });
     });
 
-    // When a new member joins, if we're the group creator, add them
     this.transport.onByName(this.topic, EV_PRESENCE_JOIN, (data) => {
-      if (!this.mls || !this.mlsReady || !this.isGroupCreator) return;
+      if (!this.mlsReady || !this.isGroupCreator) return;
       if (data.length < 16) return;
       const joinerUid = data.subarray(0, 16);
       if (bytesToHex(joinerUid) === bytesToHex(this.userId)) return;
-      console.log("[MLS] PRESENCE_JOIN from:", bytesToHex(joinerUid).slice(0, 8), "— adding member");
       this.addNewMember(joinerUid).catch((e) => console.error("[MLS] addNewMember error:", e));
     });
 
-    // When a key package upload is broadcast, if we're creator, try to add them
     this.transport.onByName(this.topic, EV_MLS_KEY_PACKAGE, (data) => {
-      if (!this.mls || !this.mlsReady || !this.isGroupCreator) return;
+      if (!this.mlsReady || !this.isGroupCreator) return;
       if (data.length < 16) return;
       const uploaderUid = data.subarray(0, 16);
       if (bytesToHex(uploaderUid) === bytesToHex(this.userId)) return;
       this.addNewMember(uploaderUid).catch(() => {});
     });
-  }
 
-  /**
-   * Initialize MLS E2EE for this channel. Call after join().
-   * Handles the full group lifecycle:
-   * - Upload our KeyPackage
-   * - If we're the only member, create the group (become creator)
-   * - If others exist, wait for a Welcome from the group creator
-   * - As creator, automatically add new members when they join
-   */
-  async initMls(mlsClient: MlsClient): Promise<void> {
-    if (this.mls) throw new Error("MLS already initialized");
-    this.mls = mlsClient;
+    // ── MLS handshake ──
 
-    // Upload our key package so others can add us
-    const kp = mlsClient.generateKeyPackage();
+    const kp = this.mls.generateKeyPackage();
     await this.uploadKeyPackage(kp);
 
-    // Ask server who the group creator is (or claim it)
     const groupInfo = await this.transport.push(this.topic, EV_MLS_GROUP_INFO, new Uint8Array(0));
 
     if (groupInfo[0] === 1) {
-      // We are the creator (first member, or previous creator expired)
-      console.log("[MLS] We are the creator — creating group");
-      await mlsClient.createGroup(this.channelIdBytes);
+      await this.mls.createGroup(this.channelIdBytes);
       this.isGroupCreator = true;
       this.setMlsReady();
     } else {
-      // Someone else is creator — wait for Welcome
-      console.log("[MLS] Not creator — waiting for Welcome + CEK");
       await new Promise<void>((resolve) => {
         const timeout = setTimeout(() => {
           if (!this.mlsReady) {
-            // Creator didn't send Welcome — re-claim creator role
-            // by calling group_info again (NX expired or creator gone)
             this.transport.push(this.topic, EV_MLS_GROUP_INFO, new Uint8Array(0))
               .then(async () => {
                 if (!this.mlsReady) {
                   try {
-                    await mlsClient.createGroup(this.channelIdBytes);
+                    await this.mls.createGroup(this.channelIdBytes);
                     this.isGroupCreator = true;
                     this.setMlsReady();
                   } catch { /* already created */ }
@@ -219,24 +171,20 @@ export class Channel {
   private async addNewMember(joinerUid: Uint8Array): Promise<void> {
     try {
       const packages = await this.fetchKeyPackages(bytesToHex(joinerUid));
-      console.log("[MLS] Fetched", packages.length, "key packages for", bytesToHex(joinerUid).slice(0, 8));
       if (packages.length === 0) return;
-      await this.addMlsMember(bytesToHex(joinerUid), packages[0]);
-      console.log("[MLS] Member added, sending CEK...");
-      if (this.mls) {
-        const encryptedCek = this.mls.encryptCekForMember(this.channelIdBytes);
-        console.log("[MLS] CEK encrypted, len:", encryptedCek.length, "— pushing");
-        await this.transport.push(this.topic, EV_MLS_CEK, encryptedCek);
-        console.log("[MLS] CEK sent OK");
-      }
+      await this.addMember(bytesToHex(joinerUid), packages[0]);
+      const encryptedCek = this.mls.encryptCekForMember(this.channelIdBytes);
+      await this.transport.push(this.topic, EV_MLS_CEK, encryptedCek);
     } catch (e) { console.error("[MLS] addNewMember failed:", e); }
   }
 
-  isMlsReady(): boolean {
+  isReady(): boolean {
     return this.mlsReady;
   }
 
   async send(content: string, contentType = 0): Promise<{ id: string }> {
+    if (!this.mlsReady) throw new Error("Channel not ready — await join() first");
+
     if (this.syncEngine && !this.transport.isConnected()) {
       const msgId = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
       await this.syncEngine.queueOffline(this.channelId, "msg:send", {
@@ -247,14 +195,12 @@ export class Channel {
 
     const ts = BigInt(Date.now());
     const msgId = crypto.getRandomValues(new Uint8Array(16));
-    let payload = new TextEncoder().encode(content);
-    if (this.mls && this.mlsReady) payload = new Uint8Array(await this.mls.encrypt(this.channelIdBytes, payload));
+    const payload = new Uint8Array(await this.mls.encrypt(this.channelIdBytes, new TextEncoder().encode(content)));
 
     const envelope = encodeEnvelope({ tenantId: this.tenantId, channelId: this.channelIdBytes, senderId: this.userId, messageId: msgId, timestamp: ts, payload });
 
     const reply = await this.transport.push(this.topic, EV_MSG_SEND, envelope);
 
-    // Optimistic local display — sender can't decrypt their own MLS ciphertext
     const msg: Message = {
       id: bytesToHex(msgId),
       sender: bytesToHex(this.userId),
@@ -264,10 +210,12 @@ export class Channel {
     } as Message;
     for (const h of this.messageHandlers) h(msg);
 
-    return { id: bytesToHex(reply.length >= 16 ? reply.subarray(0, 16) : reply) };
+    return { id: reply.length >= 16 ? bytesToHex(reply.subarray(0, 16)) : bytesToHex(msgId) };
   }
 
   async history(opts: HistoryOptions = {}): Promise<{ messages: Message[] }> {
+    if (!this.mlsReady) throw new Error("Channel not ready — await join() first");
+
     const limit = opts.limit ?? 50;
     const payload = new Uint8Array(4);
     new DataView(payload.buffer).setUint32(0, limit, true);
@@ -278,9 +226,7 @@ export class Channel {
     const messages = (await Promise.all(envelopes.map(async (envBytes) => {
       const env = decodeEnvelope(envBytes);
       let data = env.payload;
-      if (this.mls && this.mlsReady) {
-        try { data = await this.mls.decrypt(this.channelIdBytes, data); } catch { return null; }
-      }
+      try { data = await this.mls.decrypt(this.channelIdBytes, data); } catch { return null; }
       return {
         id: bytesToHex(env.messageId),
         sender: bytesToHex(env.senderId),
@@ -349,19 +295,12 @@ export class Channel {
     return { accepted: rv.getUint32(0, true), serverHlc: Number(rv.getBigUint64(4, true)) };
   }
 
-  // ── MLS ──
+  // ── MLS group management ──
 
-  createMlsGroup(): void {
-    if (!this.mls) throw new Error("MLS not configured");
-    this.mls.createGroup(this.channelIdBytes);
-  }
-
-  async addMlsMember(userId: string, keyPackage: Uint8Array): Promise<void> {
-    if (!this.mls) throw new Error("MLS not configured");
+  async addMember(userId: string, keyPackage: Uint8Array): Promise<void> {
     const { commit, welcome } = this.mls.addMember(this.channelIdBytes, keyPackage);
     const commitCapnp = encodeMlsCommit(commit);
     await this.transport.push(this.topic, EV_MLS_COMMIT, commitCapnp);
-    // Welcome: <<uid_len:16LE, uid, welcome_capnp>>
     const uidBytes = hexToBytes(userId);
     const welcomeCapnp = encodeMlsWelcome(welcome, uidBytes);
     const welcomePayload = new Uint8Array(2 + uidBytes.length + welcomeCapnp.length);
@@ -371,13 +310,13 @@ export class Channel {
     await this.transport.push(this.topic, EV_MLS_WELCOME, welcomePayload);
   }
 
-  async removeMlsMember(userId: string): Promise<void> {
-    const uidBytes = hexToBytes(userId);
-    const commitCapnp = encodeMlsCommit(new Uint8Array(0));
-    const payload = new Uint8Array(16 + commitCapnp.length);
-    payload.set(uidBytes.subarray(0, 16), 0);
-    payload.set(commitCapnp, 16);
-    await this.transport.push(this.topic, EV_MLS_REMOVE, payload);
+  async removeMember(memberIndex: number): Promise<void> {
+    const commit = this.mls.removeMember(this.channelIdBytes, memberIndex);
+    await this.transport.push(this.topic, EV_MLS_COMMIT, encodeMlsCommit(commit));
+  }
+
+  memberCount(): number {
+    return this.mls.memberCount(this.channelIdBytes);
   }
 
   async fetchKeyPackages(userId: string): Promise<Uint8Array[]> {

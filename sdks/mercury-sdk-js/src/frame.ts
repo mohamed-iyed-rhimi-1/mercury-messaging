@@ -14,7 +14,6 @@
 
 // Frame types
 export const FRAME_JOIN = 0x01;
-export const FRAME_LEAVE = 0x02;
 export const FRAME_REPLY = 0x03;
 export const FRAME_PUSH = 0x04;
 export const FRAME_BROADCAST = 0x05;
@@ -40,7 +39,6 @@ export const EV_SYNC_PUSH = 0x0c;
 export const EV_SYNC_CURSOR = 0x0d;
 export const EV_CH_CREATE = 0x0e;
 export const EV_PRESENCE_JOIN = 0x0f;
-export const EV_STATUS_UPDATE = 0x11;
 export const EV_MLS_MEMBERS = 0x12;
 export const EV_MLS_GROUP_INFO = 0x13;
 export const EV_MLS_CEK = 0x14;

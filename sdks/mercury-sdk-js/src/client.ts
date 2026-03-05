@@ -3,6 +3,7 @@ import { Channel } from "./channel";
 import { SyncEngine } from "./sync";
 import { LocalStore } from "./store";
 import { hexToBytes } from "./codec";
+import { MlsClient } from "./mls";
 import type { MercuryConfig, ConnectionState } from "./types";
 
 /**
@@ -24,6 +25,7 @@ export class MercuryClient {
   private _state: ConnectionState = "disconnected";
   private tenantId: Uint8Array;
   private userId: Uint8Array;
+  private mlsClient: MlsClient;
   private syncEngine: SyncEngine | null = null;
   private store: LocalStore | null = null;
 
@@ -31,12 +33,13 @@ export class MercuryClient {
     this.transport = new BinaryTransport(config.url, config.token);
     try {
       const payload = JSON.parse(atob(config.token.split(".")[1]));
-      this.tenantId = hexToBytes(payload.tid ?? "");
-      this.userId = hexToBytes(payload.uid ?? "");
-    } catch {
-      this.tenantId = new Uint8Array(16);
-      this.userId = new Uint8Array(16);
+      if (!payload.tid || !payload.uid) throw new Error("Token missing tid or uid");
+      this.tenantId = hexToBytes(payload.tid);
+      this.userId = hexToBytes(payload.uid);
+    } catch (e) {
+      throw new Error(`Invalid token — must be a JWT with tid and uid claims: ${(e as Error).message}`);
     }
+    this.mlsClient = new MlsClient(this.userId, config.MlsManager);
   }
 
   get state(): ConnectionState {
@@ -67,13 +70,14 @@ export class MercuryClient {
   disconnect(): void {
     this.transport.disconnect();
     this.channels.clear();
+    this.mlsClient.destroy();
     this._state = "disconnected";
   }
 
   channel(channelId: string): Channel {
     let ch = this.channels.get(channelId);
     if (!ch) {
-      ch = new Channel(this.transport, channelId, this.tenantId, this.userId);
+      ch = new Channel(this.transport, channelId, this.tenantId, this.userId, this.mlsClient);
       if (this.syncEngine) ch.syncEngine = this.syncEngine;
       this.channels.set(channelId, ch);
     }

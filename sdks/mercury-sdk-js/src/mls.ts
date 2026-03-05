@@ -11,10 +11,12 @@
  * - CEK is rotated on member removal (post-compromise security)
  */
 
-type WasmMlsManager = {
+export type WasmMlsManager = {
   generateKeyPackage(): Uint8Array;
   createGroup(groupId: Uint8Array): void;
   addMember(groupId: Uint8Array, keyPackage: Uint8Array): Uint8Array;
+  removeMember(groupId: Uint8Array, memberIndex: number): Uint8Array;
+  memberCount(groupId: Uint8Array): number;
   encrypt(groupId: Uint8Array, plaintext: Uint8Array): Uint8Array;
   decrypt(groupId: Uint8Array, ciphertext: Uint8Array): Uint8Array;
   processWelcome(welcome: Uint8Array): Uint8Array;
@@ -22,7 +24,7 @@ type WasmMlsManager = {
   free(): void;
 };
 
-type WasmMlsManagerConstructor = new (identity: Uint8Array) => WasmMlsManager;
+export type WasmMlsManagerConstructor = new (identity: Uint8Array) => WasmMlsManager;
 
 export interface AddMemberResult {
   commit: Uint8Array;
@@ -133,6 +135,14 @@ export class MlsClient {
     this.manager.processCommit(channelId, commit);
   }
 
+  removeMember(channelId: Uint8Array, memberIndex: number): Uint8Array {
+    return this.manager.removeMember(channelId, memberIndex);
+  }
+
+  memberCount(channelId: Uint8Array): number {
+    return this.manager.memberCount(channelId);
+  }
+
   /** Free WASM resources. */
   destroy(): void {
     this.manager.free();
@@ -156,6 +166,4 @@ function unpackAddMember(packed: Uint8Array): AddMemberResult {
   return { commit, welcome };
 }
 
-function toHex(bytes: Uint8Array): string {
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-}
+import { bytesToHex as toHex } from "./codec";

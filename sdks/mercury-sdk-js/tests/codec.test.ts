@@ -34,7 +34,7 @@ describe("Cap'n Proto Codec", () => {
   });
 
   test("hex roundtrip", () => {
-    const hex = "00FF80AABB";
+    const hex = "00ff80aabb";
     const bytes = hexToBytes(hex);
     expect(bytes).toEqual(new Uint8Array([0, 255, 128, 170, 187]));
     expect(bytesToHex(bytes)).toBe(hex);

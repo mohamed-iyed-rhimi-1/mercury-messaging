@@ -1,9 +1,13 @@
+import type { WasmMlsManagerConstructor } from "./mls";
+
 /** Configuration for creating a MercuryClient. */
 export interface MercuryConfig {
   /** WebSocket gateway URL (e.g. "wss://gateway.example.com/ws"). */
   url: string;
   /** JWT authentication token containing tenant_id, user_id, device_id. */
   token: string;
+  /** WASM MLS manager class — required for E2EE. */
+  MlsManager: WasmMlsManagerConstructor;
 }
 
 /** A received or sent message. */
